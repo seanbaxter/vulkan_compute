@@ -37,6 +37,11 @@ struct context_t {
   };
   std::map<void*, item_t> alloc_map;
 
+  template<typename type_t>
+  type_t* alloc(uint32_t count, uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT) {
+    return (type_t*)alloc(sizeof(type_t) * count, usage);
+  }
+
   void* alloc(uint32_t size, uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT);
   void free(void* p);
 
