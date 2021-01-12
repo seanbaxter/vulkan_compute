@@ -10,10 +10,11 @@
 context_t::context_t() {
   // Create the instance.
   vkb::InstanceBuilder builder;
-  auto inst_ret = builder.set_app_name("saxpfy")
+  auto inst_ret = builder.set_app_name("saxpy")
                       .require_api_version(1, 2)
                       .request_validation_layers ()
                       .use_default_debug_messenger ()
+                      .add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT)
                       .set_headless()
                       .build ();
   if (!inst_ret) {
@@ -265,6 +266,18 @@ void context_t::submit_transform(const char* name, VkShaderModule module,
     VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, push_data);
 
   vkCmdDispatch(transform.cmd_buffer, num_blocks, 1, 1);
+
+  if(barrier) {
+    VkMemoryBarrier memoryBarrier {
+      VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+      nullptr,
+      VK_ACCESS_SHADER_WRITE_BIT,  
+      VK_ACCESS_HOST_READ_BIT
+    };  
+    vkCmdPipelineBarrier(transform.cmd_buffer, 
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+      1, &memoryBarrier, 0, nullptr, 0, nullptr);
+  }
 
   vkEndCommandBuffer(transform.cmd_buffer);
 
