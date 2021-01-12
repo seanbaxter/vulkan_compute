@@ -1,0 +1,279 @@
+#include "VkBootstrap.h"
+
+#define VMA_IMPLEMENTATION
+#include "vk_mem_alloc.h"
+
+#include <type_traits>
+#include <iostream>
+#include "context.hxx"
+
+context_t::context_t() {
+  // Create the instance.
+  vkb::InstanceBuilder builder;
+  auto inst_ret = builder.set_app_name("saxpfy")
+                      .require_api_version(1, 2)
+                      .request_validation_layers ()
+                      .use_default_debug_messenger ()
+                      .set_headless()
+                      .build ();
+  if (!inst_ret) {
+      std::cerr << "Failed to create Vulkan instance. Error: " << inst_ret.error().message() << "\n";
+      exit(1);
+  }
+  vkb::Instance vkb_inst = inst_ret.value();
+  instance = vkb_inst.instance;
+
+  // Create the physical device.
+
+  vkb::PhysicalDeviceSelector selector{ vkb_inst };
+  auto phys_ret = selector
+                      .set_minimum_version (1, 2)
+                      .add_required_extension("VK_KHR_buffer_device_address")
+                      .add_required_extension("VK_KHR_shader_non_semantic_info")
+                      .require_dedicated_transfer_queue()
+                      .select();
+  if (!phys_ret) {
+      std::cerr << "Failed to select Vulkan Physical Device. Error: " << phys_ret.error().message() << "\n";
+      exit(1);
+  }
+
+  vkb::PhysicalDevice vkb_phys_device = phys_ret.value();
+  physical_device = vkb_phys_device.physical_device;
+
+  // Create the device.
+  vkb::DeviceBuilder device_builder { vkb_phys_device };
+  VkPhysicalDeviceBufferDeviceAddressFeaturesKHR feature1 {
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR,
+    nullptr,
+    true
+  };
+  device_builder.add_pNext(&feature1);
+
+  VkPhysicalDeviceFloat16Int8FeaturesKHR feature2 {
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
+    nullptr,
+    false,
+    true
+  };
+  device_builder.add_pNext(&feature2);
+
+  // automatically propagate needed data from instance & physical device
+  auto dev_ret = device_builder.build();
+  if (!dev_ret) {
+      std::cerr << "Failed to create Vulkan device. Error: " << dev_ret.error().message() << "\n";
+      exit(1);
+  }
+
+  vkb::Device vkb_device = dev_ret.value();
+  device = vkb_device.device;
+
+  // Create the compute queue.
+  // Get the graphics queue with a helper function
+  auto queue_ret = vkb_device.get_queue(vkb::QueueType::compute);
+  if (!queue_ret) {
+      std::cerr << "Failed to get queue. Error: " << queue_ret.error().message() << "\n";
+      exit(1);
+  }
+  queue = queue_ret.value();
+  queue_index = vkb_device.get_queue_index(vkb::QueueType::compute).value();
+
+  // Create a command pool.
+  VkCommandPoolCreateInfo cmdPoolInfo { 
+    VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    nullptr,
+    VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    queue_index
+  };
+  vkCreateCommandPool(device, &cmdPoolInfo, nullptr, &command_pool);
+
+  // Create the pipeline cache.
+  VkPipelineCacheCreateInfo pipelineCacheCreateInfo {
+    VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO
+  };
+  vkCreatePipelineCache(device, &pipelineCacheCreateInfo, nullptr, 
+    &pipeline_cache);
+
+  // Create the allocator.
+  VmaAllocatorCreateInfo allocatorInfo = {};
+  allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+  allocatorInfo.physicalDevice = physical_device;
+  allocatorInfo.device = device;
+  allocatorInfo.instance = instance;
+  allocatorInfo.flags = 
+    VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT |
+    VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    
+  vmaCreateAllocator(&allocatorInfo, &allocator);
+}
+
+context_t::~context_t() {
+  // Destroy the allocator.
+  assert(!alloc_map.size());
+  vmaDestroyAllocator(allocator);
+
+  // Destroy the pipelines.
+  for(auto it : transforms) {
+    transform_t& transform = it.second;
+    vkFreeCommandBuffers(device, command_pool, 1, &transform.cmd_buffer);
+    vkDestroyPipeline(device, transform.pipeline, nullptr);
+    vkDestroyPipelineLayout(device, transform.pipeline_layout, nullptr);
+  }
+
+  // Destroy the shader modules.
+  for(auto it : modules)
+    vkDestroyShaderModule(device, it.second, nullptr);
+
+  // Destroy the cache and command pool.
+  vkDestroyPipelineCache(device, pipeline_cache, nullptr);
+  vkDestroyCommandPool(device, command_pool, nullptr);
+  vkDestroyDevice(device, nullptr);
+
+  // Destroy the messenger.
+  // TODO:
+
+  // Destroy the instance.
+  vkDestroyInstance(instance, nullptr);
+}
+
+void* context_t::alloc(uint32_t size, uint32_t usage) {
+  VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+  bufferInfo.size = size;
+  bufferInfo.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | usage;
+   
+  VmaAllocationCreateInfo allocInfo = {};
+  allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  
+  VkBuffer buffer;
+  VmaAllocation allocation;
+  vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer, 
+    &allocation, nullptr);
+
+  VkBufferDeviceAddressInfo addressInfo { 
+    VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+    nullptr,
+    buffer
+  };
+  VkDeviceAddress address = vkGetBufferDeviceAddress(device, &addressInfo);
+  void* p = (void*)address;
+
+  alloc_map.insert(std::make_pair(p, item_t { size, usage, buffer, allocation }));
+  return p;
+}
+
+void context_t::free(void* p) {
+  auto it = alloc_map.find(p);
+  assert(alloc_map.end() != it);
+
+  vmaDestroyBuffer(allocator, it->second.buffer, it->second.allocation);
+  alloc_map.erase(it);
+}
+
+VkShaderModule context_t::create_module(const char* data, size_t size) {
+  auto it = modules.find(data);
+  if(modules.end() == it) {
+    VkShaderModuleCreateInfo createInfo {
+      VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      nullptr,
+      0,
+      size,
+      (const uint32_t*)data
+    };
+
+    VkShaderModule module;
+    vkCreateShaderModule(device, &createInfo, nullptr, &module);
+    it = modules.insert(std::pair(data, module)).first;
+  }
+
+  return it->second;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void context_t::submit_transform(const char* name, VkShaderModule module, 
+  int num_blocks, uint32_t push_size, const void* push_data, bool barrier) {
+
+  auto it = transforms.find(name);
+  if(transforms.end() == it) {
+    // Define a pipeline layout that takes only a push constant.
+    VkPipelineLayoutCreateInfo create_info {
+      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+    };
+    create_info.pushConstantRangeCount = 1;
+
+    VkPushConstantRange range { VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size };
+    create_info.pPushConstantRanges = &range;
+
+    VkPipelineLayout pipeline_layout;
+    vkCreatePipelineLayout(device, &create_info, nullptr, 
+      &pipeline_layout);
+
+    // Create the compute pipeline.
+    VkComputePipelineCreateInfo computePipelineCreateInfo {
+      VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      nullptr,
+      0,
+      {
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        0,
+        0,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        module,
+        name
+      },
+      pipeline_layout
+    };
+
+    VkPipeline pipeline;
+    vkCreateComputePipelines(device, pipeline_cache, 1, 
+      &computePipelineCreateInfo, nullptr, &pipeline);
+
+    // Create a command buffer.
+    VkCommandBufferAllocateInfo allocInfo {
+      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      nullptr,
+      command_pool,
+      VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      1
+    };
+
+    VkCommandBuffer cmd_buffer;
+    vkAllocateCommandBuffers(device, &allocInfo, &cmd_buffer);
+
+    transform_t transform {
+      pipeline_layout,
+      pipeline, 
+      cmd_buffer
+    };
+
+    it = transforms.insert(std::make_pair(name, transform)).first;
+  }
+
+  transform_t transform = it->second;
+
+  // Record the compute commands.
+  VkCommandBufferBeginInfo beginInfo {
+    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    nullptr,
+    VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+  };
+  vkBeginCommandBuffer(transform.cmd_buffer, &beginInfo);
+
+  vkCmdBindPipeline(transform.cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, 
+    transform.pipeline);
+
+  vkCmdPushConstants(transform.cmd_buffer, transform.pipeline_layout,
+    VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, push_data);
+
+  vkCmdDispatch(transform.cmd_buffer, num_blocks, 1, 1);
+
+  vkEndCommandBuffer(transform.cmd_buffer);
+
+  // Submit the command buffer.
+  VkSubmitInfo submitInfo {
+    VK_STRUCTURE_TYPE_SUBMIT_INFO
+  };
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &transform.cmd_buffer;
+
+  vkQueueSubmit(queue, 1, &submitInfo, 0);
+}
