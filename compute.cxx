@@ -3,7 +3,6 @@
 #include <cstdio>
 
 int main() {
-  // Initialize the Vulkan.
   context_t context;
 
   vk_transform(context, 256, [](int gid) {
