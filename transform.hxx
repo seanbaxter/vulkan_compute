@@ -3,38 +3,23 @@
 
 namespace cvk {
 
-template<typename type_t>
-[[spirv::push]]
-type_t shader_push;
-
-template<typename push_t>
-[[using spirv: comp, local_size(256)]]
-void transform_shader() {
+template<typename func_t>
+[[using spirv: comp, local_size(256), push]]
+void transform_shader(int count, func_t func) {
   int gid = glcomp_GlobalInvocationID.x;
 
-  if(gid >= shader_push<push_t>._0)
+  if(gid >= count)
     return;
 
-  shader_push<push_t>._1(gid);
+  func(gid);
 }
 
 } // namespace cvk
 
 template<typename func_t>
 static void vk_transform(int count, cmd_buffer_t& cmd_buffer, 
-  const func_t& func) {
+  func_t func) {
 
-  static_assert(std::is_trivially_copyable_v<func_t>);
-  tuple_t<int, func_t> storage { count, func };
-
-  static_assert(sizeof(storage) <= 128);
-
-  cmd_buffer.context.dispatch_compute(
-    cmd_buffer,
-    @spirv(cvk::transform_shader<decltype(storage)>), 
-    cmd_buffer.context.create_module(__spirv_data, __spirv_size),
-    (count + 255) / 256,
-    sizeof(storage),
-    &storage
-  );
+  int num_blocks = (count + 255) / 256;
+  cvk::transform_shader<<<num_blocks, cmd_buffer>>>(count, func);
 }

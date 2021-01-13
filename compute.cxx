@@ -3,8 +3,9 @@
 #include "launch.hxx"
 #include <cstdio>
 
-[[using spirv: comp, local_size(128), push]]
-void saxpy(int count, float a, float* x, float* y) {
+template<int NT = 128, typename type_t>
+[[using spirv: comp, local_size(NT), push]]
+void saxpy(int count, type_t a, type_t* x, type_t* y) {
   int gid = glcomp_GlobalInvocationID.x;
   if(gid < count)
     y[gid] += a * x[gid];
@@ -59,6 +60,6 @@ int main() {
   context.free(y);
   context.free(host);
 
-  return true;
+  return 0;
 }
 
