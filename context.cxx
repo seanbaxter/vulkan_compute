@@ -391,7 +391,7 @@ void cmd_buffer_t::barrier() {
     VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     nullptr,
     VK_ACCESS_SHADER_WRITE_BIT,  
-    VK_ACCESS_HOST_READ_BIT
+    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT
   };  
   vkCmdPipelineBarrier(vkCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
     VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
