@@ -1,13 +1,12 @@
 #include "context.hxx"
 #include "transform.hxx"
 #include <cstdio>
-#include <cassert>
 
 [[using spirv: comp, local_size(128), push]]
 void saxpy(int count, float a, float* x, float* y) {
   int gid = glcomp_GlobalInvocationID.x;
   if(gid < count)
-    y[gid] += a * x[gid];  
+    y[gid] += a * x[gid];
 }
 
 int main() {
@@ -16,7 +15,7 @@ int main() {
   // Create a command buffer.
   cmd_buffer_t cmd_buffer(context);
 
-  int count = 10000;
+  int count = 100;
   float a = 3;
   float* x = context.alloc_gpu<float>(count);
   float* y = context.alloc_gpu<float>(count);
@@ -41,7 +40,7 @@ int main() {
   // Copy the data to host memory.
   float* host = context.alloc_cpu<float>(count);
 
-  cmd_buffer.barrier();
+  cmd_buffer.host_barrier();
   context.memcpy(cmd_buffer, host, y, sizeof(float) * count);
 
   // End and submit the command buffer.

@@ -93,7 +93,7 @@ struct cmd_buffer_t {
 
   void begin();
   void end();
-  void barrier();
+  void host_barrier();
   
   context_t& context;
   VkCommandBuffer vkCommandBuffer;

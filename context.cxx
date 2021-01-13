@@ -344,6 +344,17 @@ void context_t::dispatch_compute(VkCommandBuffer cmd_buffer, const char* name,
     VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, push_data);
 
   vkCmdDispatch(cmd_buffer, num_blocks, 1, 1);
+
+
+  VkMemoryBarrier memoryBarrier = {
+    VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+    nullptr, 
+    VK_ACCESS_SHADER_WRITE_BIT,
+    VK_ACCESS_SHADER_READ_BIT 
+  };
+  vkCmdPipelineBarrier(cmd_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memoryBarrier, 0, nullptr, 0, 
+    nullptr);
 }
 
 void context_t::submit(VkCommandBuffer cmd_buffer) {
@@ -386,7 +397,7 @@ void cmd_buffer_t::end() {
   vkEndCommandBuffer(vkCommandBuffer);
 }
 
-void cmd_buffer_t::barrier() {
+void cmd_buffer_t::host_barrier() {
   VkMemoryBarrier memoryBarrier {
     VK_STRUCTURE_TYPE_MEMORY_BARRIER,
     nullptr,
