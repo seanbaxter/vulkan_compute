@@ -1,5 +1,6 @@
 #include "context.hxx"
 #include "transform.hxx"
+#include "launch.hxx"
 #include <cstdio>
 
 [[using spirv: comp, local_size(128), push]]
@@ -12,14 +13,13 @@ void saxpy(int count, float a, float* x, float* y) {
 int main() {
   context_t context;
 
-  // Create a command buffer.
-  cmd_buffer_t cmd_buffer(context);
-
+  // Allocate test data storage.
   int count = 100;
-  float a = 3;
   float* x = context.alloc_gpu<float>(count);
   float* y = context.alloc_gpu<float>(count);
 
+  // Create a command buffer.
+  cmd_buffer_t cmd_buffer(context);
   cmd_buffer.begin();
  
   // Initialize the data on the GPU using lambda closure syntax. This is 
@@ -34,6 +34,7 @@ int main() {
   // thread blocks. This is best for kernels requiring cooperative parallel
   // programming. You control the block size. The first chevron argument is 
   // the number of blocks, not the number of threads.
+  float a = 3;
   int num_blocks = (count + 127) / 128;
   saxpy<<<num_blocks, cmd_buffer>>>(count, a, x, y);
 

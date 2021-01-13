@@ -3,6 +3,11 @@
 #include <vulkan/vulkan.h>
 #include "vk_mem_alloc.h"
 
+template<typename... types_t>
+struct tuple_t {
+  types_t @(int...) ...;
+};
+
 struct context_t {
   context_t();
   ~context_t();
