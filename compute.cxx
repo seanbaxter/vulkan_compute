@@ -2,17 +2,13 @@
 #include "transform.hxx"
 #include <cstdio>
 
-constexpr int div_up(int x, int y) {
-  return (x + y - 1) / y;
-}
-
 [[using spirv: comp, local_size(128), push]]
-void saxpy(int count, float a, const float* x, float* y) {
+void saxpy(int count, float a, float* x, float* y) {
   int gid = glcomp_GlobalInvocationID.x;
- // if(gid < count) { 
- //   x[gid] = gid;
- //   y[gid] = sin(.01f * gid);
- // }
+  if(gid < count) {
+    x[gid] = a;
+  //  y[gid] = 2 * gid + 1; //a * x[gid];
+  }
 }
 
 int main() {
@@ -21,31 +17,49 @@ int main() {
   // Create a command buffer.
   cmd_buffer_t cmd_buffer(context);
 
-  int count = 1000;
+  int count = 10000;
   float a = 3;
   float* x = context.alloc_gpu<float>(count);
   float* y = context.alloc_gpu<float>(count);
-  
-  // Initialize the data on the GPU. Use launch chevron syntax.
-  int num_blocks = div_up(count, 128);
-  saxpy<<<num_blocks, cmd_buffer>>>(count, a, x, y);
 
-  // Compute the SAXPY with transform syntax. Use a closure to capture the 
-  // arguments.
-  vk_transform(cmd_buffer, count, [=](int index) {
-    y[index] += a * x[index];
-  });
+  cmd_buffer.begin();
+ 
+  // Initialize the data on the GPU using lambda closure syntax. This is 
+  // better for embarrassingly parallel launches. The lambda is invoked once
+  // for each index < count.
+  // vk_transform(count, cmd_buffer, [=](int index) {
+  //   x[index] = index;
+  //   y[index] = 2 * index + 1;
+  // });
+
+  // Perform SAXPY with a chevron launch. This launches the compute shader on 
+  // thread blocks. This is best for kernels requiring cooperative parallel
+  // programming. You control the block size. The first chevron argument is 
+  // the number of blocks, not the number of threads.
+  int num_blocks = (count + 127) / 128;
+  saxpy<<<num_blocks, cmd_buffer>>>(count, 1, x, y);
+  saxpy<<<num_blocks, cmd_buffer>>>(count, 2, x, y);
+  saxpy<<<num_blocks, cmd_buffer>>>(count, 3, x, y);
 
   // Copy the data to host memory.
   float* host = context.alloc_cpu<float>(count);
-  context.memcpy(cmd_buffer, host, y, sizeof(float) * count);
+  context.memcpy(cmd_buffer, host, x, sizeof(float) * count);
 
-  // Submite the command buffer.
+  // End and submit the command buffer.
+  cmd_buffer.end();
+  context.submit(cmd_buffer);
 
   // And wait for it to be done.
   vkQueueWaitIdle(context.queue);
 
-  printf("%3d: %f\n", @range(count), host[:])...;
+  // Print our results.
+  for(int i = 0; i < count; ++i)
+    printf("%3d: %f\n", i, host[i]);
+
+  context.free(x);
+  context.free(y);
+  context.free(host);
 
   return true;
 }
+

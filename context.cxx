@@ -127,7 +127,6 @@ context_t::~context_t() {
   // Destroy the pipelines.
   for(auto it : transforms) {
     transform_t& transform = it.second;
-    vkFreeCommandBuffers(device, command_pool, 1, &transform.cmd_buffer);
     vkDestroyPipeline(device, transform.pipeline, nullptr);
     vkDestroyPipelineLayout(device, transform.pipeline_layout, nullptr);
   }
@@ -150,7 +149,7 @@ context_t::~context_t() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void* context_t::alloc_gpu(uint32_t size, uint32_t usage) {
+void* context_t::alloc_gpu(size_t size, uint32_t usage) {
   VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
   bufferInfo.size = size;
   bufferInfo.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | usage;
@@ -175,7 +174,7 @@ void* context_t::alloc_gpu(uint32_t size, uint32_t usage) {
   return p;
 }
 
-void* context_t::alloc_cpu(uint32_t size, uint32_t usage) {
+void* context_t::alloc_cpu(size_t size, uint32_t usage) {
   VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
   bufferInfo.size = size;
   bufferInfo.usage = usage;
@@ -289,8 +288,9 @@ VkShaderModule context_t::create_module(const char* data, size_t size) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void context_t::submit_transform(const char* name, VkShaderModule module, 
-  int num_blocks, uint32_t push_size, const void* push_data, bool barrier) {
+void context_t::dispatch_compute(VkCommandBuffer cmd_buffer, const char* name,
+  VkShaderModule module, int num_blocks, uint32_t push_size, 
+  const void* push_data) {
 
   auto it = transforms.find(name);
   if(transforms.end() == it) {
@@ -327,22 +327,9 @@ void context_t::submit_transform(const char* name, VkShaderModule module,
     vkCreateComputePipelines(device, pipeline_cache, 1, 
       &computePipelineCreateInfo, nullptr, &pipeline);
 
-    // Create a command buffer.
-    VkCommandBufferAllocateInfo allocInfo {
-      VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      nullptr,
-      command_pool,
-      VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      1
-    };
-
-    VkCommandBuffer cmd_buffer;
-    vkAllocateCommandBuffers(device, &allocInfo, &cmd_buffer);
-
     transform_t transform {
       pipeline_layout,
-      pipeline, 
-      cmd_buffer
+      pipeline
     };
 
     it = transforms.insert(std::make_pair(name, transform)).first;
@@ -350,47 +337,62 @@ void context_t::submit_transform(const char* name, VkShaderModule module,
 
   transform_t transform = it->second;
 
-  // Record the compute commands.
-  VkCommandBufferBeginInfo beginInfo {
-    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-    nullptr,
-    VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
-  };
-  vkBeginCommandBuffer(transform.cmd_buffer, &beginInfo);
-
-  vkCmdBindPipeline(transform.cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, 
+  vkCmdBindPipeline(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, 
     transform.pipeline);
 
-  vkCmdPushConstants(transform.cmd_buffer, transform.pipeline_layout,
+  vkCmdPushConstants(cmd_buffer, transform.pipeline_layout,
     VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, push_data);
 
-  vkCmdDispatch(transform.cmd_buffer, num_blocks, 1, 1);
+  vkCmdDispatch(cmd_buffer, num_blocks, 1, 1);
+}
 
-  if(barrier) {
-    VkMemoryBarrier memoryBarrier {
-      VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-      nullptr,
-      VK_ACCESS_SHADER_WRITE_BIT,  
-      VK_ACCESS_HOST_READ_BIT
-    };  
-    vkCmdPipelineBarrier(transform.cmd_buffer, 
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
-      1, &memoryBarrier, 0, nullptr, 0, nullptr);
-  }
-
-  vkEndCommandBuffer(transform.cmd_buffer);
-
+void context_t::submit(VkCommandBuffer cmd_buffer) {
   // Submit the command buffer.
   VkSubmitInfo submitInfo {
     VK_STRUCTURE_TYPE_SUBMIT_INFO
   };
   submitInfo.commandBufferCount = 1;
-  submitInfo.pCommandBuffers = &transform.cmd_buffer;
+  submitInfo.pCommandBuffers = &cmd_buffer;
 
   vkQueueSubmit(queue, 1, &submitInfo, 0);
 }
 
-///////////////////////////////////////////////////////////////////////////////
-
 cmd_buffer_t::cmd_buffer_t(context_t& context) : context(context) { 
+  VkCommandBufferAllocateInfo allocInfo {
+    VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    nullptr,
+    context.command_pool,
+    VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    1
+  };
+  vkAllocateCommandBuffers(context.device, &allocInfo, &vkCommandBuffer);
+}
+
+cmd_buffer_t::~cmd_buffer_t() {
+  vkFreeCommandBuffers(context.device, context.command_pool, 1, 
+    &vkCommandBuffer);
+}
+
+void cmd_buffer_t::begin() {
+  VkCommandBufferBeginInfo beginInfo {
+    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    nullptr,
+    VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+  };
+  vkBeginCommandBuffer(vkCommandBuffer, &beginInfo);
+}
+
+void cmd_buffer_t::end() {
+  vkEndCommandBuffer(vkCommandBuffer);
+}
+
+void cmd_buffer_t::barrier() {
+  VkMemoryBarrier memoryBarrier {
+    VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+    nullptr,
+    VK_ACCESS_SHADER_WRITE_BIT,  
+    VK_ACCESS_HOST_READ_BIT
+  };  
+  vkCmdPipelineBarrier(vkCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 }

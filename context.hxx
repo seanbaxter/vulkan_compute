@@ -75,18 +75,26 @@ struct context_t {
   struct transform_t {
     VkPipelineLayout pipeline_layout;
     VkPipeline pipeline;
-    VkCommandBuffer cmd_buffer;
   };
   std::map<const char*, transform_t> transforms;
 
-  void submit_transform(const char* name, VkShaderModule module, 
-    int num_blocks, uint32_t push_size, const void* push_data, 
-    bool barrier);
+  void dispatch_compute(VkCommandBuffer cmd_buffer, const char* name, 
+    VkShaderModule module, int num_blocks, uint32_t push_size, 
+    const void* push_data);
+
+  void submit(VkCommandBuffer cmd_buffer);
 };
 
 struct cmd_buffer_t {
   cmd_buffer_t(context_t& context);
   ~cmd_buffer_t();
+
+  operator VkCommandBuffer() { return vkCommandBuffer; }
+
+  void begin();
+  void end();
+  void barrier();
   
   context_t& context;
+  VkCommandBuffer vkCommandBuffer;
 };
