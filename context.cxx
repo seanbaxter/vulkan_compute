@@ -1,3 +1,5 @@
+// #define USE_VALIDATION
+
 #include "VkBootstrap.h"
 
 #define VMA_IMPLEMENTATION
@@ -12,9 +14,12 @@ context_t::context_t() {
   vkb::InstanceBuilder builder;
   auto inst_ret = builder.set_app_name("saxpy")
                       .require_api_version(1, 2)
+                      #ifdef USE_VALIDATION
                       .request_validation_layers ()
                       .use_default_debug_messenger ()
+                      .add_debug_messenger_severity(VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)
                       .add_validation_feature_enable(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT)
+                      #endif
                       .set_headless()
                       .build ();
   if (!inst_ret) {
@@ -105,11 +110,18 @@ context_t::context_t() {
     VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     
   vmaCreateAllocator(&allocatorInfo, &allocator);
+
+  // Allocate a 16MB staging buffer.
+  staging = alloc_cpu(16<< 20, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+    VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 }
 
 context_t::~context_t() {
+  // Destroy the staging memory.
+  free(staging);
+
   // Destroy the allocator.
-  assert(!alloc_map.size());
+  assert(!buffer_map.size());
   vmaDestroyAllocator(allocator);
 
   // Destroy the pipelines.
@@ -136,7 +148,9 @@ context_t::~context_t() {
   vkDestroyInstance(instance, nullptr);
 }
 
-void* context_t::alloc(uint32_t size, uint32_t usage) {
+////////////////////////////////////////////////////////////////////////////////
+
+void* context_t::alloc_gpu(uint32_t size, uint32_t usage) {
   VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
   bufferInfo.size = size;
   bufferInfo.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | usage;
@@ -157,17 +171,102 @@ void* context_t::alloc(uint32_t size, uint32_t usage) {
   VkDeviceAddress address = vkGetBufferDeviceAddress(device, &addressInfo);
   void* p = (void*)address;
 
-  alloc_map.insert(std::make_pair(p, item_t { size, usage, buffer, allocation }));
+  buffer_map.insert(std::make_pair(p, buffer_t { size, usage, buffer, allocation }));
   return p;
 }
 
+void* context_t::alloc_cpu(uint32_t size, uint32_t usage) {
+  VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+  bufferInfo.size = size;
+  bufferInfo.usage = usage;
+   
+  VmaAllocationCreateInfo allocInfo = {};
+  allocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+  
+  VkBuffer buffer;
+  VmaAllocation allocation;
+  vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer, 
+    &allocation, nullptr);
+
+  void* p;
+  vmaMapMemory(allocator, allocation, &p);
+
+  buffer_map.insert(std::make_pair(p, buffer_t { size, usage |
+     0x8000'0000, buffer, allocation }));
+  return p;
+}
 void context_t::free(void* p) {
-  auto it = alloc_map.find(p);
-  assert(alloc_map.end() != it);
+  auto it = buffer_map.find(p);
+  assert(buffer_map.end() != it && p == it->first);
+
+  if(it->second.is_cpu())
+    vmaUnmapMemory(allocator, it->second.allocation);
 
   vmaDestroyBuffer(allocator, it->second.buffer, it->second.allocation);
-  alloc_map.erase(it);
+  buffer_map.erase(it);
 }
+
+context_t::buffer_it_t context_t::find_buffer(void* p) {
+  buffer_it_t it = buffer_map.lower_bound(p);
+  if(buffer_map.end() != it) {
+    // Check the range.
+    const char* p2 = (const char*)it->first + it->second.size;
+    if(p >= p2)
+      it = buffer_map.end();
+  }
+  return it;
+}
+
+void context_t::memcpy(VkCommandBuffer cmd_buffer, void* dest, void* source, 
+  size_t size) {
+
+  buffer_it_t dest_it = find_buffer(dest);
+  buffer_it_t source_it = find_buffer(source);
+
+  // At least one side must refer to buffer memory. Otherwise we'd just use
+  // normal memcpy.
+  assert(buffer_map.end() != dest_it || buffer_map.end() != source_it);
+
+  if(buffer_map.end() == dest_it) {
+    if(source_it->second.is_cpu()) {
+      ::memcpy(dest, source, size);
+
+    } else {
+      // The source is GPU memory. First copy into the staging buffer.
+      memcpy(cmd_buffer, staging, source, size);
+
+      // FENCE.
+
+      // Then memcpy to the dest.
+      ::memcpy(dest, staging, size);
+    }
+
+  } else if(buffer_map.end() == source_it) {
+    if(dest_it->second.is_cpu()) {
+      ::memcpy(dest, source, size);
+
+    } else {
+      // The dest is GPU memory. First copy into the staging buffer.
+      ::memcpy(staging, source, size);
+
+      // FENCE
+
+      // Now copy the staging buffer into the dest.
+      memcpy(cmd_buffer, dest, staging, size);
+    }
+
+  } else {
+    // Copy between buffers.
+    VkBufferCopy copyRegion { };
+    copyRegion.srcOffset = ((const char*)source - (const char*)source_it->first);
+    copyRegion.dstOffset = ((const char*)dest - (const char*)dest_it->first);
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmd_buffer, source_it->second.buffer, 
+      dest_it->second.buffer, 1, &copyRegion);
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 VkShaderModule context_t::create_module(const char* data, size_t size) {
   auto it = modules.find(data);
@@ -289,4 +388,9 @@ void context_t::submit_transform(const char* name, VkShaderModule module,
   submitInfo.pCommandBuffers = &transform.cmd_buffer;
 
   vkQueueSubmit(queue, 1, &submitInfo, 0);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+cmd_buffer_t::cmd_buffer_t(context_t& context) : context(context) { 
 }

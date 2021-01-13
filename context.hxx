@@ -29,16 +29,45 @@ struct context_t {
 
   VmaAllocator allocator;
 
-  struct item_t {
+  struct buffer_t {
     uint32_t size;
     uint32_t usage;
     VkBuffer buffer;
     VmaAllocation allocation;
-  };
-  std::map<void*, item_t> alloc_map;
 
-  void* alloc(uint32_t size, uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    bool is_cpu() const noexcept {
+      return 0x8000'0000 & usage;
+    }
+  };
+  typedef std::map<void*, buffer_t> buffer_map_t;
+  typedef buffer_map_t::iterator buffer_it_t;
+  buffer_map_t buffer_map;
+  void* staging;
+
+  void* alloc_gpu(size_t size, 
+    uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+  template<typename type_t>
+  type_t* alloc_gpu(size_t count, 
+    uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT) {
+    return (type_t*)alloc_gpu(sizeof(type_t) * count, usage);
+  }
+
+  void* alloc_cpu(size_t size, 
+    uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+  template<typename type_t>
+  type_t* alloc_cpu(size_t count, 
+    uint32_t usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT) {
+    return (type_t*)alloc_cpu(sizeof(type_t) * count, usage);
+  }
+
   void free(void* p);
+  buffer_it_t find_buffer(void* p);
+
+  // Copy between buffer memory. At least one operand must map to a buffer.
+  void memcpy(VkCommandBuffer cmd_buffer, void* dest, void* source, 
+    size_t size);
 
   std::map<const char*, VkShaderModule> modules;
   VkShaderModule create_module(const char* data, size_t size);
@@ -53,4 +82,11 @@ struct context_t {
   void submit_transform(const char* name, VkShaderModule module, 
     int num_blocks, uint32_t push_size, const void* push_data, 
     bool barrier);
+};
+
+struct cmd_buffer_t {
+  cmd_buffer_t(context_t& context);
+  ~cmd_buffer_t();
+  
+  context_t& context;
 };
